@@ -33,7 +33,7 @@
 
 ```bash
 mkdir -p ~/.workbuddy/skills/colima-installer
-curl -fsSL https://raw.githubusercontent.com/<YOUR_GITHUB>/colima-installer/main/SKILL.md \
+curl -fsSL https://raw.githubusercontent.com/m9rco/colima-installer-skill/main/SKILL.md \
   -o ~/.workbuddy/skills/colima-installer/SKILL.md
 ```
 

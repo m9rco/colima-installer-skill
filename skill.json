@@ -4,7 +4,7 @@
   "description": "在 macOS 上安装轻量级 Docker 环境（Colima + docker CLI），预配国内镜像加速器。",
   "author": "Marco Pu",
   "license": "MIT",
-  "homepage": "https://github.com/<YOUR_GITHUB>/colima-installer",
+  "homepage": "https://github.com/m9rco/colima-installer-skill",
   "keywords": [
     "docker",
     "colima",
