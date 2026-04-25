@@ -1,0 +1,206 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  SKILL_SLUG: colima-installer
+  SKILL_NAME: colima-installer
+
+jobs:
+  release:
+    name: Package and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install packaging tools
+        run: sudo apt-get install -y zip jq
+
+      - name: Compute version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            BUILD_VERSION="${{ github.ref_name }}"
+            TAG_NAME="${{ github.ref_name }}"
+            IS_TAG=true
+          else
+            BUILD_VERSION="sha-$(git rev-parse --short HEAD)"
+            TAG_NAME="nightly"
+            IS_TAG=false
+          fi
+          echo "build_version=${BUILD_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "is_tag=${IS_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Update _meta.json and package skill
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.build_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          PUBLISHED_AT=$(date -u +%s%3N)
+
+          # Inject version metadata into both .claude/ and .codebuddy/ copies
+          for dir in .claude/skills/${SKILL_SLUG} .codebuddy/skills/${SKILL_SLUG}; do
+            jq \
+              --arg v  "${BUILD_VERSION}" \
+              --argjson ts "${PUBLISHED_AT}" \
+              --arg url "https://github.com/${{ github.repository }}/commit/${{ github.sha }}" \
+              '.latest = {version: $v, publishedAt: $ts, commit: $url}' \
+              "${dir}/_meta.json" > "${dir}/_meta.json.tmp"
+            mv "${dir}/_meta.json.tmp" "${dir}/_meta.json"
+          done
+
+          # Pack with path <slug>/ at zip root — unzip -d ~/.codebuddy/skills/ works directly
+          mkdir -p /tmp/skill-stage/${SKILL_SLUG}
+          cp .codebuddy/skills/${SKILL_SLUG}/SKILL.md   /tmp/skill-stage/${SKILL_SLUG}/
+          cp .codebuddy/skills/${SKILL_SLUG}/_meta.json /tmp/skill-stage/${SKILL_SLUG}/
+          cd /tmp/skill-stage
+          zip -r "$OLDPWD/dist/skill-${SKILL_SLUG}.zip" ${SKILL_SLUG}/
+          cd "$OLDPWD"
+          echo "Contents of skill-${SKILL_SLUG}.zip:"
+          unzip -l dist/skill-${SKILL_SLUG}.zip
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Publish latest release (branch push)
+        if: steps.version.outputs.is_tag == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly (latest main)"
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          body: |
+            ## colima-installer nightly
+
+            Automatically updated on every push to `main`. Use a tagged version for stable releases.
+
+            **Commit:** [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+
+            ### Install skill (Claude Code / CodeBuddy / WorkBuddy)
+
+            ```bash
+            # user-level
+            mkdir -p ~/.codebuddy/skills
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/nightly/skill-colima-installer.zip \
+              -o /tmp/skill-colima-installer.zip && unzip -o /tmp/skill-colima-installer.zip -d ~/.codebuddy/skills/
+
+            # project-level
+            mkdir -p .codebuddy/skills
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/nightly/skill-colima-installer.zip \
+              -o /tmp/skill-colima-installer.zip && unzip -o /tmp/skill-colima-installer.zip -d .codebuddy/skills/
+            ```
+
+            After installing, trigger the skill by asking your AI assistant:
+            > "帮我安装轻量级 Docker" / "install Colima"
+          files: |
+            dist/skill-colima-installer.zip
+            dist/checksums.txt
+          fail_on_unmatched_files: true
+
+      - name: Publish versioned release (tag push)
+        if: steps.version.outputs.is_tag == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Release ${{ steps.version.outputs.tag }}"
+          make_latest: true
+          body: |
+            ## colima-installer ${{ steps.version.outputs.tag }}
+
+            **Commit:** [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+
+            ### Install skill
+
+            ```bash
+            # user-level
+            mkdir -p ~/.codebuddy/skills
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/skill-colima-installer.zip \
+              -o /tmp/skill-colima-installer.zip && unzip -o /tmp/skill-colima-installer.zip -d ~/.codebuddy/skills/
+            ```
+
+            Then ask your AI assistant:
+            > "帮我安装轻量级 Docker" / "install Colima on my Mac"
+          files: |
+            dist/skill-colima-installer.zip
+            dist/checksums.txt
+          fail_on_unmatched_files: true
+
+      - name: Publish skill to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+          BUILD_VERSION: ${{ steps.version.outputs.build_version }}
+          IS_TAG: ${{ steps.version.outputs.is_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLAWHUB_TOKEN:-}" ]]; then
+            echo "CLAWHUB_TOKEN not set — skipping ClawHub publish"
+            exit 0
+          fi
+
+          npm i -g clawhub --silent
+
+          # Patch clawhub publish.js to inject acceptLicenseTerms:true into the
+          # API payload — the server requires it but the current CLI (0.7.0) does
+          # not send it yet.
+          CLAWHUB_PUBLISH_JS="$(npm root -g)/clawhub/dist/cli/commands/publish.js"
+          node -e "
+            const fs = require('fs');
+            const f = process.argv[1];
+            let s = fs.readFileSync(f, 'utf8');
+            if (!s.includes('acceptLicenseTerms')) {
+              s = s.replace(
+                '...(forkOf ? { forkOf } : {}),',
+                '...(forkOf ? { forkOf } : {}), acceptLicenseTerms: true,'
+              );
+              fs.writeFileSync(f, s);
+              console.log('Patched: acceptLicenseTerms injected');
+            } else {
+              console.log('Already patched');
+            }
+          " "$CLAWHUB_PUBLISH_JS"
+
+          clawhub login --token "${CLAWHUB_TOKEN}" --no-browser --label "ci"
+
+          if [[ "${IS_TAG}" == "true" ]]; then
+            CLAWHUB_VERSION="${BUILD_VERSION#v}"   # strip leading 'v'
+            CHANGELOG="Release ${BUILD_VERSION}"
+            CLAWHUB_TAGS="latest"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            CLAWHUB_VERSION="0.0.0-nightly.${SHORT_SHA}"
+            CHANGELOG="Nightly build from commit ${SHORT_SHA}"
+            CLAWHUB_TAGS="nightly"
+          fi
+
+          for attempt in 1 2 3; do
+            echo "ClawHub publish attempt ${attempt}/3"
+            clawhub publish ".codebuddy/skills/${SKILL_SLUG}" \
+              --slug      "${SKILL_SLUG}" \
+              --name      "${SKILL_NAME}" \
+              --version   "${CLAWHUB_VERSION}" \
+              --changelog "${CHANGELOG}" \
+              --tags      "${CLAWHUB_TAGS}" \
+              --no-input && break
+            [[ ${attempt} -eq 3 ]] && { echo "All attempts failed"; exit 1; }
+            echo "Retrying in 60s..."
+            sleep 60
+          done

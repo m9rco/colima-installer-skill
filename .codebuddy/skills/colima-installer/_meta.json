@@ -1,0 +1,13 @@
+{
+  "owner": "m9rco",
+  "slug": "colima-installer",
+  "displayName": "colima-installer",
+  "description": "Install a lightweight Docker environment on macOS using Colima, with pre-configured China-region registry mirrors. A CLI-only alternative to Docker Desktop.",
+  "homepage": "https://github.com/m9rco/colima-installer-skill",
+  "latest": {
+    "version": "0.0.0",
+    "publishedAt": 0,
+    "commit": ""
+  },
+  "history": []
+}
